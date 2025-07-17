@@ -1,0 +1,673 @@
+# install.packages("haven")
+# install.packages("SemiCompRisks")
+# install.packages("ggfortify")
+# install.packages("xfun")
+rm(list = ls())
+
+require(survival)
+require(cmprsk)
+require(descr)
+require(Hmisc)
+require(lubridate)
+library(haven)
+library(MASS)
+library(Formula)
+library(SemiCompRisks)
+library(KMsurv)
+library(ggplot2)
+library(ggpubr)
+library(survminer)
+library(patchwork)
+library(xfun)
+library(extrafont)
+library(mstate)
+library(patchwork)
+setwd("D:/Learning epi-master/immortal time bias example/multistate model gvhd/CIBMTR data/P-5498")
+# load data
+dt <- read_sas("gv1803.sas7bdat")
+head(dt)
+# 需要的变量
+## Patient ID: dummycrid
+## Overall survival: dead (0: NO, 1:YES)
+## Time from HCT to death/ last follow-up date: intxsurv （应该是以“月”为单位）
+## Chronic GVHD: cgvhd (0: NO, 1:YES)
+## Time between transplant and chronic GVHD, months: intxcgvhd
+ds <- dt[,c("dummycrid","dead","intxsurv","cgvhd","intxcgvhd","agegp","sex","sexmatch")]
+head(ds)
+# 重命名
+colnames(ds) <- c("ID","d1","t1","dc","tc","age","sex","sexmatch")
+summary(ds)
+head(ds)
+# 查看重复行
+any(duplicated(ds$ID))
+# 查看 NA
+na_rows <- which(apply(ds, 1, function(x) any(is.na(x))))
+print(na_rows)
+ds[na_rows, ]
+# 无全为NA的ds
+ds <- na.omit(ds)
+ds <- subset(ds, (dc == 0) | (dc == 1 & t1 >= tc))
+ds$tc <- ifelse(ds$dc == 0,Inf,ds$tc) 
+
+# match variable
+ds <- ds[ds$sexmatch != 99, ]
+ds$match <- ifelse(ds$sexmatch %in% c(1,4),1,0)
+
+ds$ID <- seq(1:nrow(ds))
+ds$ID <- as.integer(ds$ID)
+# factor
+ds$age <- as.factor(ds$age) # 5,6,7,8
+ds$sex <- as.factor(ds$sex) # 1= male; 2 = female
+ds$match <- as.factor(ds$match) # 1 =yes; 0 = no
+ds$tc <- as.numeric(ds$tc)
+ds$dc <- as.numeric(ds$dc)
+# ds$tc <- ifelse(ds$dc == 0, )
+
+# 120 月/ 10 年 截断
+sum(ds$tc>120)
+sum(ds$tc==120)
+sum(ds$tc==Inf)
+# 没有tc在120个月后发生
+
+ds$d1 <- ifelse(ds$t1<=120,ds$d1,0)
+ds$t1 <- ifelse(ds$t1<=120,ds$t1,120)
+
+#
+table(ds$age)
+prop.table(table(ds$age))
+
+table(ds$sex)
+prop.table(table(ds$sex))
+
+table(ds$match)
+prop.table(table(ds$match))
+
+################
+## Comparison ##
+################
+
+#################### 方法1-作为基线变量分组 #######################
+fit1 <- survfit(Surv(t1, d1) ~ dc, data  = ds)
+plot1 <- ggsurvplot(
+  fit1,
+  data = ds,
+  conf.int = TRUE,                        
+  risk.table = FALSE,
+  risk.table.title = " ",
+  pval = FALSE,
+  xlab = "造血干细胞移植后时间（月）",
+  ylab = "生存概率",
+  palette = c("#2875B4","#E30D0F"), 
+  legend.labs = c("No cGVHD", "cGVHD"),
+  xlim = c(0,120),                # 主图和风险表x轴范围
+  break.time.by = 12,
+  legend = "top",
+  legend.title = "",
+  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),        # 去除主网格线
+          panel.grid.minor = element_blank(),        # 去除次网格线
+          axis.line = element_line(color = "black"),
+          panel.background = element_rect(fill = "white", color = "white"))#,
+ # title = "不同cGVHD状态下的总生存率"
+)
+plot1$plot <- plot1$plot +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120))
+
+print(plot1)
+
+jpeg("method1_KM_plot.jpg", width = 2100, height = 2100, res = 300)
+print(plot1)
+# save
+dev.off()
+# check
+max(ds$t1[ds$dc==0])
+max(ds$t1[ds$dc==1])
+sum(ds$dc==1)
+# save
+m1 <- coxph(Surv(t1, d1) ~ dc, data  = ds)
+
+################ 方法2- cGvHD as time dependent variable ###################
+ds$lm <- 3
+ds_lm <- subset(ds,t1>lm)
+ds_lm$dc_at_lm <- ifelse(ds_lm$tc<ds_lm$lm,1,0)
+# lm 前多少人 cghvd
+table(ds_lm$dc_at_lm)
+
+dsr0<-transform(ds_lm[ds_lm$dc_at_lm==0,],rowid=1,tstart=lm,tstop=ifelse(dc==0,t1,tc),ev=ifelse(dc==0,d1,0),dc_td=0)
+# this is the first row
+#print(dsr0[dsr0$patid %in% subs,])
+
+dsr1<-transform(ds_lm[ds_lm$dc==1,],rowid=2,tstart=ifelse(dc_at_lm==0,tc,lm),tstop=t1,ev=d1,dc_td=1)
+# this is the second row
+#print(dsr1[dsr1$patid %in% subs,])
+
+dsexp<-rbind(dsr0,dsr1)
+#dsexp<-dsexp[order(dsexp$patid),]
+#print(dsexp[dsexp$patid %in% subs,])
+dim(dsexp)
+head(dsexp)
+tail(dsexp)
+# 4361+sum(ds$dc==1)
+
+dsexp$dc_td <- as.factor(dsexp$dc_td)
+fit2 <- survfit(Surv(tstart,tstop,ev) ~ dc_td, data = dsexp)
+#出现发生cGVHD后马上删失的人
+dsexp[dsexp$tstart==dsexp$tstop,]
+dsexp[dsexp$tstart>dsexp$tstop,]
+dsexp <- subset(dsexp,dsexp$tstart<dsexp$tstop)
+dim(dsexp)
+# 失去2 subjects 可以吗?
+
+# Fit2
+fit2 <- survfit(Surv(tstart,tstop,ev) ~ dc_td, data = dsexp)
+
+# 作图
+plot2 <- ggsurvplot(
+  fit2,
+  data = dsexp,
+  conf.int = TRUE,                        
+  risk.table = FALSE,
+  risk.table.title = " ",
+  pval = FALSE,
+  xlab = "造血干细胞移植后时间（月）",
+  ylab = "生存概率",
+  palette = c("#2875B4","#E30D0F"), 
+  legend.labs = c("No cGVHD", "cGVHD"),
+  xlim = c(0,120),                
+  break.time.by = 12,
+  legend = "top",
+  legend.title = "",
+  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),        
+          panel.grid.minor = element_blank(),        
+          axis.line = element_line(color = "black"),
+          panel.background = element_rect(fill = "white", color = "white"))#,
+  #title = "不同cGVHD状态下的总生存率"
+)
+plot2$plot <- plot2$plot +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120))
+print(plot2)
+jpeg("method2_SM_plot.jpg", width = 2100, height = 2100, res = 300)
+print(plot2)
+# save
+dev.off()
+plot(fit2)
+m1 <- coxph(Surv(t1, d1) ~ dc, data  = ds)
+m2<-coxph(Surv(tstart,tstop, ev) ~ dc_td, data = dsexp)
+
+
+# check
+
+# save
+
+################ 方法3- landmarking tool ###################
+# 半年
+ds$dc_05y <- ifelse(ds$tc<6,1,0)
+table(ds$dc_05y)
+ds$dc_05y <- ifelse(ds$dc == 0,0,ds$dc_05y)
+ds_05y <- subset(ds,ds$t1>6)
+ds_05y$entry <- 6
+ds_05y$dc_05y <- as.factor(ds_05y$dc_05y)
+fit3 <- survfit(Surv(entry,t1,d1)~dc_05y,data = ds_05y)
+
+# 作图
+plot3 <- ggsurvplot(
+  fit3,
+  data = ds_05y,
+  conf.int = TRUE, 
+  risk.table = FALSE,
+  risk.table.title = " ",
+  pval = FALSE,
+  xlab = "造血干细胞移植后时间（月）",
+  ylab = "生存概率",
+  palette = c("#2875B4","#E30D0F"), 
+  legend.labs = c("No cGVHD", "cGVHD"),
+  xlim = c(0,120),                
+  break.time.by = 12,
+  legend = "top",
+  legend.title = "",
+  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),        
+          panel.grid.minor = element_blank(),        
+          axis.line = element_line(color = "black"),
+          panel.background = element_rect(fill = "white", color = "white")),
+  title = "移植后半年开始"
+)
+plot3$plot <- plot3$plot +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
+  geom_vline(xintercept = 6, linetype = "dashed", color = "black", size = 0.5) +
+  annotate("segment", x = 0, xend = 6, y = 1, yend = 1, color = "white", size = 2)
+
+print(plot3)
+
+# 1 年
+ds$dc_1y <- ifelse(ds$tc<12,1,0)
+table(ds$dc_1y)
+ds$dc_1y <- ifelse(ds$dc == 0,0,ds$dc_1y)
+ds_1y <- subset(ds,ds$t1>12)
+ds_1y$entry <- 12
+ds_1y$dc_1y <- as.factor(ds_1y$dc_1y)
+fit4 <- survfit(Surv(entry,t1,d1)~dc_1y,data = ds_1y)
+
+# 作图
+plot4 <- ggsurvplot(
+  fit4,
+  data = ds_1y,
+  conf.int = TRUE, 
+  risk.table = FALSE,
+  risk.table.title = " ",
+  pval = FALSE,
+  xlab = "造血干细胞移植后时间（月）",
+  ylab = "生存概率",
+  palette = c("#2875B4","#E30D0F"), 
+  legend.labs = c("No cGVHD", "cGVHD"),
+  xlim = c(0,120),                
+  break.time.by = 12,
+  legend = "top",
+  legend.title = "",
+  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),        
+          panel.grid.minor = element_blank(),        
+          axis.line = element_line(color = "black"),
+          panel.background = element_rect(fill = "white", color = "white")),
+  title = "移植后一年开始"
+)
+plot4$plot <- plot4$plot +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
+  geom_vline(xintercept = 12, linetype = "dashed", color = "black", size = 0.5) +
+  annotate("segment", x = 0, xend = 12, y = 1, yend = 1, color = "white", size = 2)
+
+print(plot4)
+
+# 2 年
+ds$dc_2y <- ifelse(ds$tc<24,1,0)
+table(ds$dc_2y)
+ds$dc_2y <- ifelse(ds$dc == 0,0,ds$dc_2y)
+ds_2y <- subset(ds,ds$t1>24)
+ds_2y$entry <- 24
+ds_2y$dc_2y <- as.factor(ds_2y$dc_2y)
+fit5 <- survfit(Surv(entry,t1,d1)~dc_2y,data = ds_2y)
+
+# 作图
+plot5 <- ggsurvplot(
+  fit5,
+  data = ds_2y,
+  conf.int = TRUE, 
+  risk.table = FALSE,
+  risk.table.title = " ",
+  pval = FALSE,
+  xlab = "造血干细胞移植后时间（月）",
+  ylab = "生存概率",
+  palette = c("#2875B4","#E30D0F"), 
+  legend.labs = c("No cGVHD", "cGVHD"),
+  xlim = c(0,120),                
+  break.time.by = 12,
+  legend = "top",
+  legend.title = "",
+  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank(),        
+          panel.grid.minor = element_blank(),        
+          axis.line = element_line(color = "black"),
+          panel.background = element_rect(fill = "white", color = "white")),
+  title = "移植后二年开始"
+)
+plot5$plot <- plot5$plot +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
+  geom_vline(xintercept = 24, linetype = "dashed", color = "black", size = 0.5) +
+  annotate("segment", x = 0, xend = 24, y = 1, yend = 1, color = "white", size = 2)
+
+print(plot5)
+# save
+final_plot <- plot3$plot / plot4$plot / plot5$plot
+ggsave("method3_landmarking_plot.jpg", final_plot, width = 7, height = 21,dpi = 300)
+
+
+
+############## Multi-State Model ###############
+# Trans Matrix
+tmat <- transMat(x=list(c(2,3),3,c()),names=c("Tx","cGVHD","Death"))
+mseds <- msprep(data = ds, trans = tmat, time = c(NA,"tc","t1"), 
+                 status = c(NA,"dc", "d1"), keep = c("age","sex","match"),id="ID")
+#11062
+events(mseds)
+colnames(mseds)
+
+c0 <- coxph(Surv(Tstart, Tstop, status) ~ strata(trans), data = mseds, method = "breslow")
+# check
+sum(mseds$Tstart > mseds$Tstop)
+sum(mseds$Tstart == mseds$Tstop)
+mseds <- subset(mseds,mseds$Tstart<mseds$Tstop)
+attr(mseds,"trans") <- tmat
+# 失去2 subjects, 11060
+c0 <- coxph(Surv(Tstart, Tstop, status) ~ strata(trans), data = mseds, method = "breslow")
+summary(c0)
+table(mseds$trans)
+
+msf0 <- msfit(object = c0, vartype = "greenwood", trans = tmat)
+head(msf0$Haz)
+tail(msf0$Haz)
+
+plot(msf0, las = 1, lty = rep(1:2, c(8, 4)), xlab = "Months since Tx")
+
+
+msf0a <- msfit(object = c0, vartype = "aalen", trans = tmat)
+
+
+
+pt0 <- probtrans(msf0, predt = 0, method = "greenwood")
+pt0a <- probtrans(msf0a, predt = 0, method = "aalen")
+summary(pt0, from = 1)
+
+library("colorspace")
+
+#####################
+###  area func  #####
+#####################
+# area_fun <- function(pt,from){
+#   df <- pt[[from]]
+#   time <- df$time
+#   probs <- df[, grep("^pstate", names(df))]  # pstate1, pstate2, ...
+#   
+#   # area under curve
+#   areas <- sapply(probs, function(p) sum(diff(time) * (head(p, -1) + tail(p, -1)) / 2))
+#   
+#   prop <- areas / sum(areas)
+#   prop_label <- paste0(c("Tx","cGVHD","Death"), ": ", round(100 * prop, 1), "%")
+#   
+#   return(prop_label)
+# }
+
+statecols <- heat_hcl(4, c = c(80, 30), l = c(30, 90), power = c(1/5, 2))[c(3,2,1)]
+ord <- c(1,2,3)
+jpeg("multi_state_plot1.jpg", width = 2100, height = 2100, res = 300)
+plot(pt0, ord = ord, xlab = "造血干细胞移植后时间（月）", ylab = "概率",  las = 1, type = "filled", col = statecols[ord],xlim = c(0, 120),xaxt = "n")
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt0 <- area_fun(pt = pt0,from = 1)
+#legend("topright", legend = prop_label_pt0[ord], fill = statecols[ord], cex = 1.2, bty = "n")
+dev.off()
+
+# 0.5 year
+jpeg("multi_state_panel_plot.jpg", width = 2400, height = 2700, res = 300)
+par(mfrow = c(3, 2))
+pt05y <- probtrans(msf0, predt = 6, method = "greenwood")
+plot(pt05y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植半年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt05y <- area_fun(pt = pt05y, from = 1)
+#legend("topright", legend = prop_label_pt05y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+
+plot(pt05y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植半年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt05y_2 <- area_fun(pt = pt05y, from = 2)
+#legend("topright", legend = prop_label_pt05y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+
+# 1 year
+pt1y <- probtrans(msf0, predt = 12, method = "greenwood")
+plot(pt1y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植一年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt1y <- area_fun(pt = pt1y, from = 1)
+#legend("topright", legend = prop_label_pt1y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+
+plot(pt1y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植一年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt1y_2 <- area_fun(pt = pt1y, from = 2)
+#legend("topright", legend = prop_label_pt1y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+
+# 2 year
+pt2y <- probtrans(msf0, predt = 24, method = "greenwood")
+plot(pt2y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植二年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt2y <- area_fun(pt = pt2y, from = 1)
+#legend("topright", legend = prop_label_pt2y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+
+plot(pt2y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植二年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+axis(side = 1,at = seq(0, 120, by = 12))
+#prop_label_pt2y_2 <- area_fun(pt = pt2y, from = 2)
+#legend("topright", legend = prop_label_pt2y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
+par(mfrow = c(1, 1))
+dev.off()
+
+# 0.5年起始,5年内死亡概率,即5.5年=66
+df1 <- pt05y[[1]]
+df1[which.min(abs(df1$time-(6+12*5))),]
+
+df2 <- pt05y[[2]]
+df2[which.min(abs(df2$time-(6+12*5))),]
+
+# 1年起始,5年内死亡概率，即6年=72
+df1_1 <- pt1y[[1]]
+df1_1[which.min(abs(df1_1$time-(12+12*5))),]
+
+df2_1 <- pt1y[[2]]
+df2_1[which.min(abs(df2_1$time-(12+12*5))),]
+
+# 2年起始,5年内死亡概率，即7年=84
+df1_2 <- pt2y[[1]]
+df1_2[which.min(abs(df1_2$time-(24+12*5))),]
+
+df2_2 <- pt2y[[2]]
+df2_2[which.min(abs(df2_2$time-(24+12*5))),]
+
+
+# # full cox
+# covs <- c("age", "sex", "match")
+# mseds <- expand.covs(mseds, covs, longnames = FALSE)
+# cfull <- coxph(Surv(Tstart, Tstop, status) ~ age1.1 + age1.2 + age1.3 + age2.1 + age2.2 + age2.3 + age3.1 + age3.2 + age3.3 +
+#                  sex.1 + sex.2 + sex.3 + match.1 + match.2 + match.3 + strata(trans), data = mseds, method = "breslow")
+# 
+# # AALEN estimator
+# jpeg("multi_state_AB_plot.jpg", width = 4200, height = 2100, res = 300)
+# par(mfrow = c(1, 2))
+# whA <- which(mseds$age == 5 & mseds$match == 1 & mseds$sex == 1)
+# patA <- mseds[rep(whA[1], 3), 9:11]
+# patA$trans <- 1:3
+# attr(patA, "trans") <- tmat
+# patA <- expand.covs(patA, covs, longnames = FALSE)
+# patA$strata <- patA$trans
+# msfA <- msfit(cfull, patA, trans = tmat)
+# ptA <- probtrans(msfA, predt = 0)
+# plot(ptA, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植后状态概率堆积图（患者A）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+# axis(side = 1,at = seq(0, 120, by = 12))
+# prop_label_ptA <- area_fun(pt = ptA, from = 1)
+# legend("topright", legend = prop_label_ptA[ord], fill = statecols[ord], cex = 1.2, bty = "n")
+# 
+# whB <- which(mseds$age == 8 & mseds$match == 0 & mseds$sex == 2)
+# patB <- mseds[rep(whB[1], 3), 9:11]
+# patB$trans <- 1:3
+# attr(patB, "trans") <- tmat
+# patB <- expand.covs(patB, covs, longnames = FALSE)
+# patB$strata <- patB$trans
+# msfB <- msfit(cfull, patB, trans = tmat)
+# ptB <- probtrans(msfB, predt = 0)
+# plot(ptB, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植后状态概率堆积图（患者B）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
+# axis(side = 1,at = seq(0, 120, by = 12))
+# prop_label_ptB <- area_fun(pt = ptB, from = 1)
+# legend("topright", legend = prop_label_ptB[ord], fill = statecols[ord], cex = 1.2, bty = "n")
+# par(mfrow = c(1, 1))
+# dev.off()
+
+################# G-Formula ####################
+
+# long data trans
+library(data.table)
+library(gfoRmula)
+setDTthreads(threads = 1)
+setDT(ds)
+ds[, t1 := floor(t1)]
+ds[, tc := floor(tc)]
+max_time <- max(ds$t1)
+long_data <- ds[rep(1:.N, t1 + 1)]
+long_data[, time_month := 0:(t1[1]), by = ID]
+
+# time-varying covariate
+long_data[, cGVHD := as.integer(time_month >= tc)]
+
+# outcome
+long_data[, event := 0]
+long_data[time_month == t1 & d1 == 1, event := 1]
+
+# variables
+baseline_vars <- c("age", "sex", "match")
+final_vars <- c("ID", "time_month", baseline_vars, "cGVHD", "event")
+long_data <- long_data[, ..final_vars]
+# check
+print(long_data[ID == ds[dc==1, ID][1]])
+ds[ID == ds[dc==1, ID][1]]
+
+print(long_data[ID == ds[dc==0, ID][300]])
+ds[ID == ds[dc==0, ID][300]]
+
+
+## outcome model
+outcome_model <- as.formula(paste("event ~ age + sex + match + time_month + lag1_cGVHD"))
+
+print(outcome_model)
+
+time_points <-  max_time
+
+# Perform
+gformula_time <- system.time(
+  
+  gform_results <- gformula(
+    seed = 1234,
+    # 数据与ID定义
+    obs_data = long_data,
+    id = "ID",
+    time_name = "time_month",
+    time_points = time_points,
+    
+    # 结局定义
+    outcome_name = "event",
+    outcome_type = "survival",
+    ymodel = outcome_model,
+    sim_data = FALSE,
+    #ref_int = 1,
+    intcomp = c(1,2),
+    
+    # 历史变量定义
+    histories = c(lagged),
+    histvars = list(c("cGVHD")),
+    
+    # 协变量定义
+    covnames = c("cGVHD"),
+    covtypes = c("absorbing"), # cGVHD是吸收状态
+    basecovs = baseline_vars,
+    covparams = list(covmodels = c(cGVHD ~ age + sex + match + time_month)),
+    
+    # 干预定义：比较三种治疗方案
+    intvars = list("cGVHD", "cGVHD"),
+    interventions = list(
+      list(c(static, rep(0,time_points))),
+      list(c(static, rep(1,time_points)))
+    ),
+    int_descript = c(
+      "从未发生cGVHD",
+      "发生过cGVHD"
+    ),
+    nsimul = length(ds$ID),
+    parallel = TRUE,
+    nsamples = 20,
+    ncores = (parallel::detectCores() - 1)
+  )
+)
+gform_results$result
+gform_results$hazardratio_val
+# HR 验证和手动计算#####################
+##
+#########################################
+# gform_results2 <- gformula(
+#   seed = 1234,
+#   # 数据与ID定义
+#   obs_data = long_data,
+#   id = "ID",
+#   time_name = "time_month",
+#   time_points = time_points,
+#   
+#   # 结局定义
+#   outcome_name = "event",
+#   outcome_type = "survival",
+#   ymodel = outcome_model,
+#   sim_data = TRUE,
+#   #ref_int = 1,
+#   intcomp = c(1,2),
+#   
+#   # 历史变量定义
+#   histories = c(lagged),
+#   histvars = list(c("cGVHD")),
+#   
+#   # 协变量定义
+#   covnames = c("cGVHD"),
+#   covtypes = c("absorbing"), # cGVHD是吸收状态
+#   basecovs = baseline_vars,
+#   covparams = list(covmodels = c(cGVHD ~ age + sex + match + time_month)),
+#   
+#   # 干预定义：比较三种治疗方案
+#   intvars = list("cGVHD", "cGVHD"),
+#   interventions = list(
+#     list(c(static, rep(0,time_points))),
+#     list(c(static, rep(1,time_points)))
+#   ),
+#   int_descript = c(
+#     "从未发生cGVHD",
+#     "发生过cGVHD"
+#   ),
+#   nsimul = length(ds$ID),
+#   parallel = TRUE,
+#   #nsamples = 20,
+#   ncores = (parallel::detectCores() - 1)
+# )
+# sim_data <- gform_results2$sim_data  # 这名字可能不同，具体看你的结果结构
+# table(sim_data$`Natural course`$intervened) 
+# table(sim_data$从未发生cGVHD$intervened) # 查看各组样本数
+# table(sim_data$发生过cGVHD$intervened) 
+# 
+# 
+# sim1 <- gform_results2$sim_data[[2]] # no cGVHD
+# table(sim1$intervened) 
+# sim2 <- gform_results2$sim_data[[3]] # cGVHD
+# table(sim2$intervened) 
+# 
+# sim1$intervention <- 0
+# sim2$intervention <- 1
+# combined_data <- rbind(sim1, sim2)
+# combined_data$intervention <- as.factor(combined_data$intervention)
+# table(combined_data$intervention)
+# coxph(Surv(time_month,Y) ~ intervention, data = combined_data)
+# 
+# # intcomp = c(2,1) in gfoRmula
+# gform_results2$hazardratio_val
+
+
+
+
+# regression
+m1 <- coxph(Surv(t1, d1) ~ dc, data  = ds)
+m2<-coxph(Surv(tstart,tstop, ev) ~ dc_td, data = dsexp)
+m3_05 <- coxph(Surv(entry,t1,d1)~dc_05y,data = ds_05y)
+m3_1 <- coxph(Surv(entry,t1,d1)~dc_1y,data = ds_1y)
+m3_2 <- coxph(Surv(entry,t1,d1)~dc_2y,data = ds_2y)
+
+s_m1 <- summary(m1)
+s_m2 <- summary(m2)
+s_m3_05 <- summary(m3_05)
+s_m3_1 <- summary(m3_1)
+s_m3_2 <- summary(m3_2)
+s <- list(s_m1,s_m2,s_m3_05,s_m3_1,s_m3_2)
+
+hr_table <- as.data.frame(matrix(nrow = 5,ncol = 2))
+colnames(hr_table) <- c("HR","95% CI")
+rownames(hr_table) <- c("m1","m2","m3_05","m3_1","m3_2")
+for (i in 1:5) {
+  s_used <- s[[i]]
+  hr_table[i,1] <- round(s_used$conf.int[1],2)
+  hr_table[i,2] <- paste0(round(s_used$conf.int[3],2)," ~ ",round(s_used$conf.int[4],2))
+}
