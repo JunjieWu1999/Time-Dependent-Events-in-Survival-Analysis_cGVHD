@@ -3,7 +3,6 @@ rm(list = ls())
 
 library(survival)
 library(cmprsk)
-library(descr)
 library(Hmisc)
 library(lubridate)
 library(haven)
@@ -13,13 +12,20 @@ library(SemiCompRisks)
 library(KMsurv)
 library(ggplot2)
 library(ggpubr)
+library(ggsurvfit)
 library(survminer)
 library(patchwork)
 library(xfun)
 library(extrafont)
 library(mstate)
 library(patchwork)
+library(tidycmprsk)
+library(showtext)
+
+showtext_auto()
+
 # load data
+setwd("D:/Learning epi-master/immortal time bias example/multistate model gvhd/CIBMTR data/P-5498")
 dt <- read_sas("gv1803.sas7bdat")
 head(dt)
 # 需要的变量
@@ -78,6 +84,87 @@ prop.table(table(ds$sex))
 table(ds$match)
 prop.table(table(ds$match))
 
+# 中位生存时间
+fit_survtime <- survfit(Surv(t1,d1)~1,data = ds)
+round(summary(fit_survtime)$table["median"],2)
+ggsurvplot(fit_survtime)
+
+## cGVHD 特征描述
+# 总发病率
+nrow(ds[ds$dc == 1,])
+round(nrow(ds[ds$dc == 1,])/nrow(ds)*100,2)
+
+# 累计发病率
+ds$ftime <- pmin(ds$t1, ds$tc)
+ds$fstatus <- with(ds, ifelse(dc == 1 & tc <= t1, 2,       # cGVHD先发生或仅cGVHD发生
+                              ifelse(d1 == 1 & t1 < tc, 1,        # 死亡先发生
+                                     0))) 
+cif_res <- cmprsk::cuminc(ftime = ds$ftime, fstatus = ds$fstatus)
+
+# 以cGVHD为例，代码是2
+cgvhd_cif <- cif_res$`1 2`    # 注意cuminc默认名称是 "组号 事件代码" 格式
+
+# 定义目标时间点（假设单位为月）
+target_times <- c(12, 24)
+
+# 找最接近目标时间点的索引
+idx_12 <- which.min(abs(cgvhd_cif$time - target_times[1]))
+idx_24 <- which.min(abs(cgvhd_cif$time - target_times[2]))
+
+# 对应的累计发病率估计
+cif_12 <- round(cgvhd_cif$est[idx_12]*100,2)
+cif_24 <- round(cgvhd_cif$est[idx_24]*100,2)
+## 12个月
+cif_12
+## 24个月
+cif_24
+
+## cgvhd累计发生率
+
+
+# 用 tidycmprsk 创建生存对象
+ds$fstatus <- factor(ds$fstatus, levels = 0:2)
+
+# 绘图带 at risk
+p_cgvhdcum <- tidycmprsk::cuminc(Surv(ftime, fstatus) ~ 1, data = ds) %>%
+  ggcuminc(outcome = 2) +
+  add_confidence_interval() +
+  scale_ggsurvfit() +
+  labs(
+    x = "造血干细胞移植后时间（月）",
+    y = "累计发生率"
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 0.6, by = 0.1),  # y轴刻度：0, 0.1, ..., 0.5
+    limits = c(0, 0.6),              # y轴范围
+    expand = c(0, 0)
+  ) +
+  scale_x_continuous(
+    breaks = c(0, 6, 12, 18, 24),        # x轴刻度：0, 6, 12, 24
+    limits = c(0, 24),               # 可视范围（可调整）
+    expand = c(0, 0)
+  ) +
+  theme_minimal(base_size = 40) +
+  theme(
+    axis.ticks = element_line(color = "black", linewidth = 1),  
+    axis.ticks.length = unit(0.25, "cm"),
+    panel.grid.major = element_blank(),        
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.background = element_rect(fill = "white", color = "white")
+  )
+
+print(p_cgvhdcum)
+ggsave("cgvhd累计发病率图.jpg", plot = p_cgvhdcum, height = 15,width = 21, units = "cm", dpi = 300)
+
+cif_fit <- cuminc(Surv(ftime, fstatus) ~ 1, data = ds)
+
+# 转为数据框查看
+cif_df <- tidy(cif_fit)
+
+# 查看某个具体事件（例如 event == 2）的累计概率
+prob <- subset(cif_df, outcome == "2") 
+
 ################
 ## Comparison ##
 ################
@@ -94,12 +181,12 @@ plot1 <- ggsurvplot(
   xlab = "造血干细胞移植后时间（月）",
   ylab = "生存概率",
   palette = c("#2875B4","#E30D0F"), 
-  legend.labs = c("No cGVHD", "cGVHD"),
+  legend.labs = c("未发生慢性移植物抗宿主病组", "发生慢性移植物抗宿主病组"),
   xlim = c(0,120),                # 主图和风险表x轴范围
   break.time.by = 12,
-  legend = "top",
+  legend = c(0.75,0.9),
   legend.title = "",
-  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+  ggtheme = theme_minimal(base_size = 40) +
     theme(plot.title = element_text(hjust = 0.5),
           panel.grid.major = element_blank(),        # 去除主网格线
           panel.grid.minor = element_blank(),        # 去除次网格线
@@ -111,12 +198,11 @@ plot1$plot <- plot1$plot +
   scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
   scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120))
 
+print(plot1$plot)
+
+ggsave("method1_KM_plot.jpg", plot = plot1$plot, height = 15,width = 21,units = "cm", dpi = 300)
 print(plot1)
 
-jpeg("method1_KM_plot.jpg", width = 2100, height = 2100, res = 300)
-print(plot1)
-# save
-dev.off()
 # check
 max(ds$t1[ds$dc==0])
 max(ds$t1[ds$dc==1])
@@ -170,12 +256,12 @@ plot2 <- ggsurvplot(
   xlab = "造血干细胞移植后时间（月）",
   ylab = "生存概率",
   palette = c("#2875B4","#E30D0F"), 
-  legend.labs = c("No cGVHD", "cGVHD"),
+  legend.labs = c("未发生慢性移植物抗宿主病组", "发生慢性移植物抗宿主病组"),
   xlim = c(0,120),                
   break.time.by = 12,
-  legend = "top",
+  legend = c(0.75,0.9),
   legend.title = "",
-  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+  ggtheme = theme_minimal(base_size = 40) +
     theme(plot.title = element_text(hjust = 0.5),
           panel.grid.major = element_blank(),        
           panel.grid.minor = element_blank(),        
@@ -186,11 +272,11 @@ plot2 <- ggsurvplot(
 plot2$plot <- plot2$plot +
   scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
   scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120))
-print(plot2)
-jpeg("method2_SM_plot.jpg", width = 2100, height = 2100, res = 300)
-print(plot2)
-# save
-dev.off()
+print(plot2$plot)
+ggsave("method2_SM_plot.jpg", plot = plot2$plot, height = 15,width = 21,  units = "cm", dpi = 300)
+
+
+#
 plot(fit2)
 m1 <- coxph(Surv(t1, d1) ~ dc, data  = ds)
 m2<-coxph(Surv(tstart,tstop, ev) ~ dc_td, data = dsexp)
@@ -221,24 +307,23 @@ plot3 <- ggsurvplot(
   xlab = "造血干细胞移植后时间（月）",
   ylab = "生存概率",
   palette = c("#2875B4","#E30D0F"), 
-  legend.labs = c("No cGVHD", "cGVHD"),
+  legend.labs = c("未发生慢性移植物抗宿主病组", "发生慢性移植物抗宿主病组"),
   xlim = c(0,120),                
   break.time.by = 12,
-  legend = "top",
+  legend = c(0.75,0.9),
   legend.title = "",
-  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+  ggtheme = theme_minimal(base_size = 60) +
     theme(plot.title = element_text(hjust = 0.5),
           panel.grid.major = element_blank(),        
           panel.grid.minor = element_blank(),        
           axis.line = element_line(color = "black"),
-          panel.background = element_rect(fill = "white", color = "white")),
-  title = "移植后半年开始"
+          panel.background = element_rect(fill = "white", color = "white"))
 )
 plot3$plot <- plot3$plot +
   scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
   scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
-  geom_vline(xintercept = 6, linetype = "dashed", color = "black", size = 0.5) +
-  annotate("segment", x = 0, xend = 6, y = 1, yend = 1, color = "white", size = 2)
+  geom_vline(xintercept = 6, linetype = "dashed", color = "black", linewidth = 0.5) +
+  annotate("segment", x = 0, xend = 6, y = 1, yend = 1, color = "white", linewidth = 2)
 
 print(plot3)
 
@@ -262,24 +347,23 @@ plot4 <- ggsurvplot(
   xlab = "造血干细胞移植后时间（月）",
   ylab = "生存概率",
   palette = c("#2875B4","#E30D0F"), 
-  legend.labs = c("No cGVHD", "cGVHD"),
+  legend.labs = c("未发生慢性移植物抗宿主病组", "发生慢性移植物抗宿主病组"),
   xlim = c(0,120),                
   break.time.by = 12,
-  legend = "top",
+  legend = c(0.75,0.9),
   legend.title = "",
-  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+  ggtheme = theme_minimal(base_size = 60) +
     theme(plot.title = element_text(hjust = 0.5),
           panel.grid.major = element_blank(),        
           panel.grid.minor = element_blank(),        
           axis.line = element_line(color = "black"),
-          panel.background = element_rect(fill = "white", color = "white")),
-  title = "移植后一年开始"
+          panel.background = element_rect(fill = "white", color = "white"))
 )
 plot4$plot <- plot4$plot +
   scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
   scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
-  geom_vline(xintercept = 12, linetype = "dashed", color = "black", size = 0.5) +
-  annotate("segment", x = 0, xend = 12, y = 1, yend = 1, color = "white", size = 2)
+  geom_vline(xintercept = 12, linetype = "dashed", color = "black", linewidth = 0.5) +
+  annotate("segment", x = 0, xend = 12, y = 1, yend = 1, color = "white", linewidth = 2)
 
 print(plot4)
 
@@ -303,35 +387,36 @@ plot5 <- ggsurvplot(
   xlab = "造血干细胞移植后时间（月）",
   ylab = "生存概率",
   palette = c("#2875B4","#E30D0F"), 
-  legend.labs = c("No cGVHD", "cGVHD"),
+  legend.labs = c("未发生慢性移植物抗宿主病组", "发生慢性移植物抗宿主病组"),
   xlim = c(0,120),                
   break.time.by = 12,
-  legend = "top",
+  legend = c(0.75,0.9),
   legend.title = "",
-  ggtheme = theme_minimal(base_size = 12,base_family = "Arial") +
+  ggtheme = theme_minimal(base_size = 60) +
     theme(plot.title = element_text(hjust = 0.5),
           panel.grid.major = element_blank(),        
           panel.grid.minor = element_blank(),        
           axis.line = element_line(color = "black"),
-          panel.background = element_rect(fill = "white", color = "white")),
-  title = "移植后二年开始"
+          panel.background = element_rect(fill = "white", color = "white"))
 )
 plot5$plot <- plot5$plot +
   scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
   scale_x_continuous(breaks = seq(0, 120, by = 12), limits = c(0, 120)) + 
-  geom_vline(xintercept = 24, linetype = "dashed", color = "black", size = 0.5) +
-  annotate("segment", x = 0, xend = 24, y = 1, yend = 1, color = "white", size = 2)
+  geom_vline(xintercept = 24, linetype = "dashed", color = "black", linewidth = 0.5) +
+  annotate("segment", x = 0, xend = 24, y = 1, yend = 1, color = "white", linewidth = 2)
 
 print(plot5)
 # save
-final_plot <- plot3$plot / plot4$plot / plot5$plot
-ggsave("method3_landmarking_plot.jpg", final_plot, width = 7, height = 21,dpi = 300)
-
+final_plot <- (plot3$plot + plot4$plot) / (plot5$plot + plot_spacer()) +
+plot_annotation(
+  tag_levels = list(c("A", "B", "C", ""))
+)
+ggsave("method3_landmarking_plot.jpg", final_plot,  height = 30,width = 42, units = "cm",dpi = 300)
 
 
 ############## Multi-State Model ###############
 # Trans Matrix
-tmat <- transMat(x=list(c(2,3),3,c()),names=c("Tx","cGVHD","Death"))
+tmat <- transMat(x=list(c(2,3),3,c()),names=c("移植后无病状态","慢性移植物抗宿主病状态","死亡状态"))
 mseds <- msprep(data = ds, trans = tmat, time = c(NA,"tc","t1"), 
                  status = c(NA,"dc", "d1"), keep = c("age","sex","match"),id="ID")
 #11062
@@ -385,48 +470,63 @@ library("colorspace")
 
 statecols <- heat_hcl(4, c = c(80, 30), l = c(30, 90), power = c(1/5, 2))[c(3,2,1)]
 ord <- c(1,2,3)
-jpeg("multi_state_plot1.jpg", width = 2100, height = 2100, res = 300)
-plot(pt0, ord = ord, xlab = "造血干细胞移植后时间（月）", ylab = "概率",  las = 1, type = "filled", col = statecols[ord],xlim = c(0, 120),xaxt = "n")
-axis(side = 1,at = seq(0, 120, by = 12))
+jpeg("multi_state_plot1.jpg", width = 2480, height = 1772, res = 300)
+plot(pt0, ord = ord, xlab = "造血干细胞移植后时间（月）", ylab = "概率",  las = 1, type = "filled", col = statecols[ord],xlim = c(0, 120),xaxt = "n",
+     cex = 3, cex.lab = 3, cex.axis = 3)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 3)
 #prop_label_pt0 <- area_fun(pt = pt0,from = 1)
 #legend("topright", legend = prop_label_pt0[ord], fill = statecols[ord], cex = 1.2, bty = "n")
 dev.off()
 
+
 # 0.5 year
-jpeg("multi_state_panel_plot.jpg", width = 2400, height = 2700, res = 300)
-par(mfrow = c(3, 2))
+jpeg("multi_state_panel_plot.jpg", width = 2480*2, height = 1772*3, res = 300)
+par(mfrow = c(3, 2),
+    mar = c(6, 8, 4, 2))
 pt05y <- probtrans(msf0, predt = 6, method = "greenwood")
-plot(pt05y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植半年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt05y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("A", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt05y <- area_fun(pt = pt05y, from = 1)
 #legend("topright", legend = prop_label_pt05y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 
-plot(pt05y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植半年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt05y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("B", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt05y_2 <- area_fun(pt = pt05y, from = 2)
 #legend("topright", legend = prop_label_pt05y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 
 # 1 year
 pt1y <- probtrans(msf0, predt = 12, method = "greenwood")
-plot(pt1y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植一年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt1y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("C", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt1y <- area_fun(pt = pt1y, from = 1)
 #legend("topright", legend = prop_label_pt1y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 
-plot(pt1y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植一年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt1y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("D", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt1y_2 <- area_fun(pt = pt1y, from = 2)
 #legend("topright", legend = prop_label_pt1y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 
 # 2 year
 pt2y <- probtrans(msf0, predt = 24, method = "greenwood")
-plot(pt2y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植二年后状态概率堆积图", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt2y, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("E", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt2y <- area_fun(pt = pt2y, from = 1)
 #legend("topright", legend = prop_label_pt2y[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 
-plot(pt2y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", main = "移植二年后状态概率堆积图（cGVHD开始）", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord])
-axis(side = 1,at = seq(0, 120, by = 12))
+plot(pt2y, from = 2, ord = c(1,2,3), xlab = "造血干细胞移植后时间（月）", ylab = "概率", xlim = c(0, 120),xaxt = "n", las = 1, type = "filled", col = statecols[ord],
+     cex = 6, cex.lab = 6, cex.axis = 6)
+axis(side = 1,at = seq(0, 120, by = 12), cex.axis = 6)
+mtext("F", side = 3, line = 2, adj = 0, cex = 6)
 #prop_label_pt2y_2 <- area_fun(pt = pt2y, from = 2)
 #legend("topright", legend = prop_label_pt2y_2[ord], fill = statecols[ord], cex = 0.8, bty = "n")
 par(mfrow = c(1, 1))
